@@ -59,7 +59,7 @@ resource "azurerm_windows_virtual_machine" "vm" {
   availability_set_id = azurerm_availability_set.avset.id
 
   admin_username = "adminuser"
-  admin_password = "*&GVCFKuyib"
+  admin_password = "*SuperSecretPassword123"
 
   network_interface_ids = [
     azurerm_network_interface.nic[count.index].id
