@@ -1,0 +1,4 @@
+{
+    "commandToExecute": "powershell.exe -ExecutionPolicy Unrestricted -File setup-fci.ps1"
+  }
+  
