@@ -1,3 +1,6 @@
+
+# Terraform configuration block specifying required version and providers.
+# Configures the backend to use Azure Storage for storing the Terraform state.
 terraform {
   required_version = ">= 0.12.1"
   required_providers {
@@ -7,24 +10,26 @@ terraform {
     }
   }
   backend "azurerm" {
-    storage_account_name = "**************"
+    storage_account_name = ""
+    container_name       = "sql"
     key                  = "sqlcluster/terraform.tfstate"
-    access_key           = "**************"
+    access_key           = ""
   }
 }
 
+# Configures the AzureRM provider with the specified subscription ID.
 provider "azurerm" {
   features {}
-  subscription_id = "**************"
+  subscription_id = ""
 }
 
-# Resource Group
+# Creates a resource group named "sql-cluster-rg" in the "eastasia" location.
 resource "azurerm_resource_group" "rg" {
   name     = "sql-cluster-rg"
   location = "eastasia"
 }
 
-# Virtual Network
+# Creates a virtual network named "sql-cluster-vnet" with the specified address space.
 resource "azurerm_virtual_network" "vnet" {
   name                = "sql-cluster-vnet"
   address_space       = ["10.0.0.0/16"]
@@ -32,6 +37,7 @@ resource "azurerm_virtual_network" "vnet" {
   resource_group_name = azurerm_resource_group.rg.name
 }
 
+# Creates a subnet named "sql-cluster-subnet" within the virtual network.
 resource "azurerm_subnet" "subnet" {
   name                 = "sql-cluster-subnet"
   resource_group_name  = azurerm_resource_group.rg.name
@@ -39,7 +45,79 @@ resource "azurerm_subnet" "subnet" {
   address_prefixes     = ["10.0.1.0/24"]
 }
 
-# Availability Set
+# Creates a Windows virtual machine named "ad-server" for Active Directory with specified configurations.
+resource "azurerm_windows_virtual_machine" "ad_vm" {
+  name                = "ad-server"
+  resource_group_name = azurerm_resource_group.rg.name
+  location            = azurerm_resource_group.rg.location
+  size                = "Standard_DS2_v2"
+  admin_username      = "adminuser"
+  admin_password      = "SuperComplicatedPassword:-)"
+
+  network_interface_ids = [
+    azurerm_network_interface.ad_nic.id
+  ]
+
+  os_disk {
+    caching              = "ReadWrite"
+    storage_account_type = "Standard_LRS"
+  }
+
+  source_image_reference {
+    publisher = "MicrosoftWindowsServer"
+    offer     = "WindowsServer"
+    sku       = "2019-Datacenter"
+    version   = "latest"
+  }
+
+  # Provisioner to install Active Directory Domain Services and create a new forest.
+  provisioner "local-exec" {
+    command = <<EOT
+      Install-WindowsFeature AD-Domain-Services -IncludeManagementTools
+      Install-ADDSForest -DomainName "corp.local" -SafeModeAdministratorPassword (ConvertTo-SecureString "SuperComplicatedPassword:-)" -AsPlainText -Force) -Force
+    EOT
+  }
+}
+
+# Creates a network interface for the Active Directory VM.
+resource "azurerm_network_interface" "ad_nic" {
+  name                = "ad-server-nic"
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+  ip_configuration {
+    name                          = "internal"
+    subnet_id                     = azurerm_subnet.subnet.id
+    private_ip_address_allocation = "Dynamic"
+  }
+}
+
+# Creates a domain join extension for the Windows Failover Clustering (WFSC) cluster VMs.
+resource "azurerm_virtual_machine_extension" "domain_join" {
+  count                = 2
+  name                 = "domain-join-${count.index}"
+  virtual_machine_id   = azurerm_windows_virtual_machine.vm[count.index].id
+  publisher            = "Microsoft.Compute"
+  type                 = "JsonADDomainExtension"
+  type_handler_version = "1.3"
+
+  settings = <<SETTINGS
+    {
+      "Name": "corp.local",
+      "OUPath": "OU=Servers,DC=corp,DC=local",
+      "User": "adminuser@corp.local",
+      "Restart": "true",
+      "Options": "3"
+    }
+  SETTINGS
+
+  protected_settings = <<PROTECTED_SETTINGS
+    {
+      "Password": "SuperComplicatedPassword:-)"
+    }
+  PROTECTED_SETTINGS
+}
+
+# Creates an availability set for the SQL cluster VMs.
 resource "azurerm_availability_set" "avset" {
   name                         = "sql-cluster-avset"
   location                     = azurerm_resource_group.rg.location
@@ -49,7 +127,7 @@ resource "azurerm_availability_set" "avset" {
   platform_update_domain_count = 5
 }
 
-# Windows Virtual Machines
+# Creates two Windows virtual machines for the SQL cluster with specified configurations.
 resource "azurerm_windows_virtual_machine" "vm" {
   count               = 2
   name                = "sql-cluster-node-${count.index + 1}"
@@ -59,7 +137,7 @@ resource "azurerm_windows_virtual_machine" "vm" {
   availability_set_id = azurerm_availability_set.avset.id
 
   admin_username = "adminuser"
-  admin_password = "*SuperSecretPassword123"
+  admin_password = "*SuperComplicatedPassword:-)"
 
   network_interface_ids = [
     azurerm_network_interface.nic[count.index].id
@@ -77,7 +155,7 @@ resource "azurerm_windows_virtual_machine" "vm" {
     version   = "latest"
   }
 
-  # Run Custom Script Extension for Failover Clustering Setup
+  # Provisioner to run a custom script for Failover Clustering and SQL Server setup.
   provisioner "local-exec" {
     command = <<EOT
       az vm extension set --name CustomScriptExtension --publisher Microsoft.Compute \
@@ -88,8 +166,7 @@ resource "azurerm_windows_virtual_machine" "vm" {
   }
 }
 
-# Custom Script Extension for Failover Clustering Setup
-# Dynamically generate the settings block
+# Creates a custom script extension for Failover Clustering and SQL Server setup on the VMs.
 resource "azurerm_virtual_machine_extension" "cluster_setup" {
   count                = 2
   name                 = "setup-cluster-${count.index}"
@@ -105,7 +182,7 @@ resource "azurerm_virtual_machine_extension" "cluster_setup" {
   })
 }
 
-# Network Interface
+# Creates network interfaces for the SQL cluster VMs.
 resource "azurerm_network_interface" "nic" {
   count               = 2
   name                = "sql-cluster-nic-${count.index}"
@@ -118,7 +195,7 @@ resource "azurerm_network_interface" "nic" {
   }
 }
 
-# Storage Account for Shared Storage
+# Creates a storage account for shared storage.
 resource "azurerm_storage_account" "storage" {
   name                     = "sqlclusterstorage"
   resource_group_name      = azurerm_resource_group.rg.name
@@ -127,13 +204,14 @@ resource "azurerm_storage_account" "storage" {
   account_replication_type = "LRS"
 }
 
+# Creates a storage share within the storage account for shared storage.
 resource "azurerm_storage_share" "fileshare" {
   name               = "sqlsharedstorage"
   storage_account_id = azurerm_storage_account.storage.id
   quota              = 5120
 }
 
-# Load Balancer
+# Creates a load balancer for the SQL cluster.
 resource "azurerm_lb" "sql_lb" {
   name                = "sql-cluster-lb"
   location            = azurerm_resource_group.rg.location
@@ -148,16 +226,15 @@ resource "azurerm_lb" "sql_lb" {
   }
 }
 
-# Load Balancer Backend Pool
+# Creates a backend address pool for the load balancer.
 resource "azurerm_lb_backend_address_pool" "sql_lb_backend" {
   name            = "sql-backend-pool"
   loadbalancer_id = azurerm_lb.sql_lb.id
 }
 
-# Health Probe for Load Balancer
+# Creates a health probe for the load balancer to monitor SQL Server.
 resource "azurerm_lb_probe" "sql_lb_probe" {
-  name = "sql-health-probe"
-  #   resource_group_name = azurerm_resource_group.rg.name
+  name                = "sql-health-probe"
   loadbalancer_id     = azurerm_lb.sql_lb.id
   protocol            = "Tcp"
   port                = 1433
@@ -165,10 +242,9 @@ resource "azurerm_lb_probe" "sql_lb_probe" {
   number_of_probes    = 2
 }
 
-# Load Balancer Rule for SQL Server
+# Creates a load balancer rule for SQL Server traffic.
 resource "azurerm_lb_rule" "sql_lb_rule" {
-  name = "sql-lb-rule"
-  #   resource_group_name            = azurerm_resource_group.rg.name
+  name                           = "sql-lb-rule"
   loadbalancer_id                = azurerm_lb.sql_lb.id
   protocol                       = "Tcp"
   frontend_ip_configuration_name = azurerm_lb.sql_lb.frontend_ip_configuration[0].name
@@ -178,7 +254,7 @@ resource "azurerm_lb_rule" "sql_lb_rule" {
   probe_id                       = azurerm_lb_probe.sql_lb_probe.id
 }
 
-# Associate VMs to Load Balancer Backend Pool
+# Associates the network interfaces of the VMs with the load balancer backend pool.
 resource "azurerm_network_interface_backend_address_pool_association" "nic_lb_association" {
   count                   = 2
   network_interface_id    = element(azurerm_network_interface.nic[*].id, count.index)

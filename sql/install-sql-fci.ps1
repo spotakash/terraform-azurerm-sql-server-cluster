@@ -12,9 +12,9 @@ FAILOVERCLUSTERGROUP="SQLCluster"
 FAILOVERCLUSTERIPADDRESSES="IPv4;10.0.1.100;255.255.255.0"
 SQLSYSADMINACCOUNTS="adminuser"
 AGTSVCACCOUNT="adminuser"
-AGTSVCPASSWORD="P@ssw0rd1234!"
+AGTSVCPASSWORD="SuperComplicatedPassword:-)"
 SQLSVCACCOUNT="adminuser"
-SQLSVCPASSWORD="P@ssw0rd1234!"
+SQLSVCPASSWORD="SuperComplicatedPassword:-)"
 "@ | Out-File -FilePath $ConfigFile -Encoding UTF8
 
 # Run SQL Server Setup
