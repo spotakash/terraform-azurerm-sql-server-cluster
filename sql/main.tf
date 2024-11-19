@@ -71,11 +71,20 @@ resource "azurerm_windows_virtual_machine" "ad_vm" {
   }
 
   # Provisioner to install Active Directory Domain Services and create a new forest.
-  provisioner "local-exec" {
-    command = <<EOT
-      Install-WindowsFeature AD-Domain-Services -IncludeManagementTools
-      Install-ADDSForest -DomainName "corp.local" -SafeModeAdministratorPassword (ConvertTo-SecureString "SuperComplicatedPassword:-)" -AsPlainText -Force) -Force
-    EOT
+  provisioner "remote-exec" {
+    inline = [
+      "powershell -Command \"Install-WindowsFeature AD-Domain-Services -IncludeManagementTools; Install-ADDSForest -DomainName 'corp.local' -SafeModeAdministratorPassword (ConvertTo-SecureString 'SuperComplicatedPassword:-)' -AsPlainText -Force) -Force\""
+    ]
+  }
+
+  connection {
+    type     = "winrm"
+    user     = "adminuser"
+    password = "SuperComplicatedPassword:-)"
+    host     = self.private_ip_address
+    port     = 5986
+    https    = true
+    insecure = true
   }
 }
 
@@ -131,6 +140,7 @@ resource "azurerm_availability_set" "avset" {
 resource "azurerm_windows_virtual_machine" "vm" {
   count               = 2
   name                = "sql-cluster-node-${count.index + 1}"
+  computer_name       = "sqlnode${count.index + 1}"
   resource_group_name = azurerm_resource_group.rg.name
   location            = azurerm_resource_group.rg.location
   size                = "Standard_DS2_v2"
@@ -157,12 +167,7 @@ resource "azurerm_windows_virtual_machine" "vm" {
 
   # Provisioner to run a custom script for Failover Clustering and SQL Server setup.
   provisioner "local-exec" {
-    command = <<EOT
-      az vm extension set --name CustomScriptExtension --publisher Microsoft.Compute \
-      --resource-group ${azurerm_resource_group.rg.name} \
-      --vm-name sql-cluster-node-${count.index + 1} \
-      --settings @custom_script_settings.json
-    EOT
+    command = "az vm extension set --name CustomScriptExtension --publisher Microsoft.Compute --resource-group ${azurerm_resource_group.rg.name} --vm-name sql-cluster-node-${count.index + 1} --settings @${path.module}/custom_script_settings.json --protected-settings @${path.module}/custom_script_protected_settings.json"
   }
 }
 
@@ -175,7 +180,7 @@ resource "azurerm_virtual_machine_extension" "cluster_setup" {
   type                 = "CustomScriptExtension"
   type_handler_version = "1.10"
 
-  settings = templatefile("${path.module}/custom_script_settings.json.tpl", {
+  settings = templatefile("${path.module}/custom_script_settings.json", {
     StorageAccountName = azurerm_storage_account.storage.name
     StorageAccountKey  = azurerm_storage_account.storage.primary_access_key
     FileShareName      = azurerm_storage_share.fileshare.name
@@ -197,16 +202,16 @@ resource "azurerm_network_interface" "nic" {
 
 # Creates a storage account for shared storage.
 resource "azurerm_storage_account" "storage" {
-  name                     = "sqlclusterstorage"
+  name                     = "akfcistrg"
   resource_group_name      = azurerm_resource_group.rg.name
   location                 = azurerm_resource_group.rg.location
-  account_tier             = "Premium"
+  account_tier             = "Standard"
   account_replication_type = "LRS"
 }
 
 # Creates a storage share within the storage account for shared storage.
 resource "azurerm_storage_share" "fileshare" {
-  name               = "sqlsharedstorage"
+  name               = "akfcishr"
   storage_account_id = azurerm_storage_account.storage.id
   quota              = 5120
 }
