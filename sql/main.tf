@@ -11,9 +11,8 @@ terraform {
   }
   backend "azurerm" {
     storage_account_name = ""
-    container_name       = ""
-    key                  = "sqlcluster/terraform.tfstate"
-    subscription_id      = ""
+    container_name       = "tfstate"
+    key                  = ""
     use_azuread_auth     = true
   }
 }
@@ -21,17 +20,22 @@ terraform {
 # Configures the AzureRM provider with the specified subscription ID.
 provider "azurerm" {
   features {}
+  alias           = "main"
   subscription_id = ""
 }
 
 # Creates a resource group named "sql-cluster-rg" in the "eastasia" location.
 resource "azurerm_resource_group" "rg" {
+  provider = azurerm.main
+
   name     = "sql-cluster-rg"
   location = "eastasia"
 }
 
 # Creates a virtual network named "sql-cluster-vnet" with the specified address space.
 resource "azurerm_virtual_network" "vnet" {
+  provider = azurerm.main
+
   name                = "sql-cluster-vnet"
   address_space       = ["10.0.0.0/16"]
   location            = azurerm_resource_group.rg.location
@@ -39,12 +43,16 @@ resource "azurerm_virtual_network" "vnet" {
 }
 
 resource "azurerm_virtual_network_dns_servers" "dns" {
+  provider = azurerm.main
+
   virtual_network_id = azurerm_virtual_network.vnet.id
   dns_servers        = [azurerm_network_interface.ad_nic.private_ip_address]
 }
 
 # Creates a subnet named "sql-cluster-subnet" within the virtual network.
 resource "azurerm_subnet" "subnet" {
+  provider = azurerm.main
+
   name                 = "sql-cluster-subnet"
   resource_group_name  = azurerm_resource_group.rg.name
   virtual_network_name = azurerm_virtual_network.vnet.name
@@ -53,6 +61,8 @@ resource "azurerm_subnet" "subnet" {
 
 # Creates a Windows virtual machine named "ad-server" for Active Directory with specified configurations.
 resource "azurerm_windows_virtual_machine" "ad_vm" {
+  provider = azurerm.main
+
   name                = "ad-server"
   resource_group_name = azurerm_resource_group.rg.name
   location            = azurerm_resource_group.rg.location
@@ -77,24 +87,26 @@ resource "azurerm_windows_virtual_machine" "ad_vm" {
   }
 
   # Provisioner to install Active Directory Domain Services and create a new forest.
-  provisioner "remote-exec" {
-    inline = [
-      "powershell -Command \"Install-WindowsFeature AD-Domain-Services -IncludeManagementTools; Install-ADDSForest -DomainName 'corp.local' -SafeModeAdministratorPassword (ConvertTo-SecureString 'SuperComplicatedPassword:-)' -AsPlainText -Force; Restart-Computer -Force\""
-    ]
-  }
+  # provisioner "remote-exec" {
+  #   inline = [
+  #     "powershell -Command \"Install-WindowsFeature AD-Domain-Services -IncludeManagementTools; Install-ADDSForest -DomainName 'corp.local' -SafeModeAdministratorPassword (ConvertTo-SecureString 'SuperComplicatedPassword:-)' -AsPlainText -Force; Restart-Computer -Force\""
+  #   ]
+  # }
 
-  connection {
-    type     = "winrm"
-    user     = "adminuser"
-    password = "SuperComplicatedPassword:-)"
-    host     = self.private_ip_address
-    port     = 5986
-    https    = true
-    insecure = true
-  }
+  # connection {
+  #   type     = "winrm"
+  #   user     = "adminuser"
+  #   password = "SuperComplicatedPassword:-)"
+  #   host     = self.private_ip_address
+  #   port     = 5986
+  #   https    = true
+  #   insecure = true
+  # }
 }
 # Creates a network interface for the Active Directory VM.
 resource "azurerm_network_interface" "ad_nic" {
+  provider = azurerm.main
+
   name                = "ad-server-nic"
   location            = azurerm_resource_group.rg.location
   resource_group_name = azurerm_resource_group.rg.name
@@ -108,57 +120,61 @@ resource "azurerm_network_interface" "ad_nic" {
 
 # Creates a public IP address for the Active Directory VM.
 resource "azurerm_public_ip" "ad_public_ip" {
+  provider = azurerm.main
+
   name                = "ad-server-public-ip"
   location            = azurerm_resource_group.rg.location
   resource_group_name = azurerm_resource_group.rg.name
   allocation_method   = "Static"
 }
 
-# Create network security group for AD VM with inbound rules for RDP and WinRM from my current IP address
-resource "azurerm_network_security_group" "ad_nsg" {
-  name                = "ad-server-nsg"
-  location            = azurerm_resource_group.rg.location
-  resource_group_name = azurerm_resource_group.rg.name
+# # Create network security group for AD VM with inbound rules for RDP and WinRM from my current IP address
+# resource "azurerm_network_security_group" "ad_nsg" {
+#   name                = "ad-server-nsg"
+#   location            = azurerm_resource_group.rg.location
+#   resource_group_name = azurerm_resource_group.rg.name
 
-  security_rule {
-    name                       = "RDP"
-    priority                   = 1001
-    direction                  = "Inbound"
-    access                     = "Allow"
-    protocol                   = "Tcp"
-    source_port_range          = "*"
-    destination_port_range     = "3389"
-    source_address_prefix      = "*"
-    destination_address_prefix = "*"
-  }
-}
+#   security_rule {
+#     name                       = "RDP"
+#     priority                   = 1001
+#     direction                  = "Inbound"
+#     access                     = "Allow"
+#     protocol                   = "Tcp"
+#     source_port_range          = "*"
+#     destination_port_range     = "3389"
+#     source_address_prefix      = "*"
+#     destination_address_prefix = "*"
+#   }
+# }
 
-# Associates the network security group with the network interface of the Active Directory VM.
-resource "azurerm_network_interface_security_group_association" "ad_nsg_association" {
-  network_interface_id      = azurerm_network_interface.ad_nic.id
-  network_security_group_id = azurerm_network_security_group.ad_nsg.id
-}
+# # Associates the network security group with the network interface of the Active Directory VM.
+# resource "azurerm_network_interface_security_group_association" "ad_nsg_association" {
+#   network_interface_id      = azurerm_network_interface.ad_nic.id
+#   network_security_group_id = azurerm_network_security_group.ad_nsg.id
+# }
 
-# Creates a domain join extension for the Windows Failover Clustering (WFSC) cluster VMs.
-resource "azurerm_virtual_machine_extension" "join_domain" {
-  count                = 2
-  name                 = "join-domain-${count.index + 2}"
-  virtual_machine_id   = azurerm_windows_virtual_machine.vm[count.index].id
-  publisher            = "Microsoft.Compute"
-  type                 = "CustomScriptExtension"
-  type_handler_version = "1.10"
+# # Creates a domain join extension for the Windows Failover Clustering (WFSC) cluster VMs.
+# resource "azurerm_virtual_machine_extension" "join_domain" {
+#   count                = 2
+#   name                 = "join-domain-${count.index + 2}"
+#   virtual_machine_id   = azurerm_windows_virtual_machine.vm[count.index].id
+#   publisher            = "Microsoft.Compute"
+#   type                 = "CustomScriptExtension"
+#   type_handler_version = "1.10"
 
-  settings = <<SETTINGS
-    {
-      "commandToExecute": "powershell.exe -ExecutionPolicy Unrestricted -Command try { Add-Computer -DomainName 'corp.local' -Credential (New-Object PSCredential('corp.local\\adminuser', (ConvertTo-SecureString 'SuperComplicatedPassword:-)' -AsPlainText -Force))) -Restart -Force; Write-Host 'Domain Join Successful' } catch { Write-Host $_.Exception.Message; exit 1 }"
-    }
-  SETTINGS
+#   settings = <<SETTINGS
+#     {
+#       "commandToExecute": "powershell.exe -ExecutionPolicy Unrestricted -Command try { Add-Computer -DomainName 'corp.local' -Credential (New-Object PSCredential('corp.local\\adminuser', (ConvertTo-SecureString 'SuperComplicatedPassword:-)' -AsPlainText -Force))) -Restart -Force; Write-Host 'Domain Join Successful' } catch { Write-Host $_.Exception.Message; exit 1 }"
+#     }
+#   SETTINGS
 
-  depends_on = [azurerm_windows_virtual_machine.ad_vm]
-}
+#   depends_on = [azurerm_windows_virtual_machine.ad_vm]
+# }
 
 # Creates an availability set for the SQL cluster VMs.
 resource "azurerm_availability_set" "avset" {
+  provider = azurerm.main
+
   name                         = "sql-cluster-avset"
   location                     = azurerm_resource_group.rg.location
   resource_group_name          = azurerm_resource_group.rg.name
@@ -169,6 +185,8 @@ resource "azurerm_availability_set" "avset" {
 
 # Creates two Windows virtual machines for the SQL cluster with specified configurations.
 resource "azurerm_windows_virtual_machine" "vm" {
+  provider = azurerm.main
+
   count               = 2
   name                = "sql-cluster-node-${count.index + 1}"
   computer_name       = "sqlnode${count.index + 1}"
@@ -202,27 +220,27 @@ resource "azurerm_windows_virtual_machine" "vm" {
   # }
 }
 
-# Create a script to mount Azure file share on the sql cluster nodes
-resource "azurerm_virtual_machine_extension" "mount_file_share" {
-  count                = 2
-  name                 = "mount-file-share-${count.index}"
-  virtual_machine_id   = azurerm_windows_virtual_machine.vm[count.index].id
-  publisher            = "Microsoft.Compute"
-  type                 = "CustomScriptExtension"
-  type_handler_version = "1.10"
-  settings = <<SETTINGS
-    {
-      "storageAccountName": "${azurerm_storage_account.storage.name}",
-      "storageAccountKey": "${azurerm_storage_account.storage.primary_access_key}"
-    }
-  SETTINGS
+# # Create a script to mount Azure file share on the sql cluster nodes
+# resource "azurerm_virtual_machine_extension" "mount_file_share" {
+#   count                = 2
+#   name                 = "mount-file-share-${count.index}"
+#   virtual_machine_id   = azurerm_windows_virtual_machine.vm[count.index].id
+#   publisher            = "Microsoft.Compute"
+#   type                 = "CustomScriptExtension"
+#   type_handler_version = "1.10"
+#   settings = <<SETTINGS
+#     {
+#       "storageAccountName": "${azurerm_storage_account.storage.name}",
+#       "storageAccountKey": "${azurerm_storage_account.storage.primary_access_key}"
+#     }
+#   SETTINGS
 
-  protected_settings = <<PROTECTED_SETTINGS
-    {
-      "commandToExecute": "powershell -Command \"`$secpasswd = ConvertTo-SecureString '${azurerm_storage_account.storage.primary_access_key}' -AsPlainText -Force; `$creds = New-Object System.Management.Automation.PSCredential ('${azurerm_storage_account.storage.name}', `$secpasswd); New-PSDrive -Name Z -PSProvider FileSystem -Root \\\\${azurerm_storage_account.storage.name}.file.core.windows.net\\${azurerm_storage_share.fileshare.name} -Credential `$creds -Persist\""
-    }
-  PROTECTED_SETTINGS
-}
+#   protected_settings = <<PROTECTED_SETTINGS
+#     {
+#       "commandToExecute": "powershell -Command \"`$secpasswd = ConvertTo-SecureString '${azurerm_storage_account.storage.primary_access_key}' -AsPlainText -Force; `$creds = New-Object System.Management.Automation.PSCredential ('${azurerm_storage_account.storage.name}', `$secpasswd); New-PSDrive -Name Z -PSProvider FileSystem -Root \\\\${azurerm_storage_account.storage.name}.file.core.windows.net\\${azurerm_storage_share.fileshare.name} -Credential `$creds -Persist\""
+#     }
+#   PROTECTED_SETTINGS
+# }
 
 # Creates a custom script extension for Failover Clustering and SQL Server setup on the VMs.
 # resource "azurerm_virtual_machine_extension" "cluster_setup" {
@@ -242,6 +260,8 @@ resource "azurerm_virtual_machine_extension" "mount_file_share" {
 
 # Creates network interfaces for the SQL cluster VMs.
 resource "azurerm_network_interface" "nic" {
+  provider = azurerm.main
+
   count               = 2
   name                = "sql-cluster-nic-${count.index}"
   location            = azurerm_resource_group.rg.location
@@ -255,6 +275,8 @@ resource "azurerm_network_interface" "nic" {
 
 # Creates a storage account for shared storage.
 resource "azurerm_storage_account" "storage" {
+  provider = azurerm.main
+
   name                     = "akfcistrg"
   resource_group_name      = azurerm_resource_group.rg.name
   location                 = azurerm_resource_group.rg.location
@@ -264,6 +286,8 @@ resource "azurerm_storage_account" "storage" {
 
 # Creates a storage share within the storage account for shared storage.
 resource "azurerm_storage_share" "fileshare" {
+  provider = azurerm.main
+
   name               = "akfcishr"
   storage_account_id = azurerm_storage_account.storage.id
   quota              = 5120
@@ -271,6 +295,8 @@ resource "azurerm_storage_share" "fileshare" {
 
 # Creates a load balancer for the SQL cluster.
 resource "azurerm_lb" "sql_lb" {
+  provider = azurerm.main
+
   name                = "sql-cluster-lb"
   location            = azurerm_resource_group.rg.location
   resource_group_name = azurerm_resource_group.rg.name
@@ -286,12 +312,16 @@ resource "azurerm_lb" "sql_lb" {
 
 # Creates a backend address pool for the load balancer.
 resource "azurerm_lb_backend_address_pool" "sql_lb_backend" {
+  provider = azurerm.main
+
   name            = "sql-backend-pool"
   loadbalancer_id = azurerm_lb.sql_lb.id
 }
 
 # Creates a health probe for the load balancer to monitor SQL Server.
 resource "azurerm_lb_probe" "sql_lb_probe" {
+  provider = azurerm.main
+
   name                = "sql-health-probe"
   loadbalancer_id     = azurerm_lb.sql_lb.id
   protocol            = "Tcp"
@@ -302,6 +332,8 @@ resource "azurerm_lb_probe" "sql_lb_probe" {
 
 # Creates a load balancer rule for SQL Server traffic.
 resource "azurerm_lb_rule" "sql_lb_rule" {
+  provider = azurerm.main
+
   name                           = "sql-lb-rule"
   loadbalancer_id                = azurerm_lb.sql_lb.id
   protocol                       = "Tcp"
@@ -314,6 +346,8 @@ resource "azurerm_lb_rule" "sql_lb_rule" {
 
 # Associates the network interfaces of the VMs with the load balancer backend pool.
 resource "azurerm_network_interface_backend_address_pool_association" "nic_lb_association" {
+  provider = azurerm.main
+
   count                   = 2
   network_interface_id    = element(azurerm_network_interface.nic[*].id, count.index)
   backend_address_pool_id = azurerm_lb_backend_address_pool.sql_lb_backend.id
