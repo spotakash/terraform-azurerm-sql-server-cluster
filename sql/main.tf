@@ -11,9 +11,10 @@ terraform {
   }
   backend "azurerm" {
     storage_account_name = ""
-    container_name       = "sql"
+    container_name       = ""
     key                  = "sqlcluster/terraform.tfstate"
-    access_key           = ""
+    subscription_id      = ""
+    use_azuread_auth     = true
   }
 }
 
@@ -35,6 +36,11 @@ resource "azurerm_virtual_network" "vnet" {
   address_space       = ["10.0.0.0/16"]
   location            = azurerm_resource_group.rg.location
   resource_group_name = azurerm_resource_group.rg.name
+}
+
+resource "azurerm_virtual_network_dns_servers" "dns" {
+  virtual_network_id = azurerm_virtual_network.vnet.id
+  dns_servers        = [azurerm_network_interface.ad_nic.private_ip_address]
 }
 
 # Creates a subnet named "sql-cluster-subnet" within the virtual network.
@@ -66,14 +72,14 @@ resource "azurerm_windows_virtual_machine" "ad_vm" {
   source_image_reference {
     publisher = "MicrosoftWindowsServer"
     offer     = "WindowsServer"
-    sku       = "2019-Datacenter"
+    sku       = "2022-datacenter-g2"
     version   = "latest"
   }
 
   # Provisioner to install Active Directory Domain Services and create a new forest.
   provisioner "remote-exec" {
     inline = [
-      "powershell -Command \"Install-WindowsFeature AD-Domain-Services -IncludeManagementTools; Install-ADDSForest -DomainName 'corp.local' -SafeModeAdministratorPassword (ConvertTo-SecureString 'SuperComplicatedPassword:-)' -AsPlainText -Force) -Force\""
+      "powershell -Command \"Install-WindowsFeature AD-Domain-Services -IncludeManagementTools; Install-ADDSForest -DomainName 'corp.local' -SafeModeAdministratorPassword (ConvertTo-SecureString 'SuperComplicatedPassword:-)' -AsPlainText -Force; Restart-Computer -Force\""
     ]
   }
 
@@ -87,7 +93,6 @@ resource "azurerm_windows_virtual_machine" "ad_vm" {
     insecure = true
   }
 }
-
 # Creates a network interface for the Active Directory VM.
 resource "azurerm_network_interface" "ad_nic" {
   name                = "ad-server-nic"
@@ -97,33 +102,59 @@ resource "azurerm_network_interface" "ad_nic" {
     name                          = "internal"
     subnet_id                     = azurerm_subnet.subnet.id
     private_ip_address_allocation = "Dynamic"
+    public_ip_address_id          = azurerm_public_ip.ad_public_ip.id
   }
 }
 
+# Creates a public IP address for the Active Directory VM.
+resource "azurerm_public_ip" "ad_public_ip" {
+  name                = "ad-server-public-ip"
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+  allocation_method   = "Static"
+}
+
+# Create network security group for AD VM with inbound rules for RDP and WinRM from my current IP address
+resource "azurerm_network_security_group" "ad_nsg" {
+  name                = "ad-server-nsg"
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+
+  security_rule {
+    name                       = "RDP"
+    priority                   = 1001
+    direction                  = "Inbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_range     = "3389"
+    source_address_prefix      = "*"
+    destination_address_prefix = "*"
+  }
+}
+
+# Associates the network security group with the network interface of the Active Directory VM.
+resource "azurerm_network_interface_security_group_association" "ad_nsg_association" {
+  network_interface_id      = azurerm_network_interface.ad_nic.id
+  network_security_group_id = azurerm_network_security_group.ad_nsg.id
+}
+
 # Creates a domain join extension for the Windows Failover Clustering (WFSC) cluster VMs.
-resource "azurerm_virtual_machine_extension" "domain_join" {
+resource "azurerm_virtual_machine_extension" "join_domain" {
   count                = 2
-  name                 = "domain-join-${count.index}"
+  name                 = "join-domain-${count.index + 2}"
   virtual_machine_id   = azurerm_windows_virtual_machine.vm[count.index].id
   publisher            = "Microsoft.Compute"
-  type                 = "JsonADDomainExtension"
-  type_handler_version = "1.3"
+  type                 = "CustomScriptExtension"
+  type_handler_version = "1.10"
 
   settings = <<SETTINGS
     {
-      "Name": "corp.local",
-      "OUPath": "OU=Servers,DC=corp,DC=local",
-      "User": "adminuser@corp.local",
-      "Restart": "true",
-      "Options": "3"
+      "commandToExecute": "powershell.exe -ExecutionPolicy Unrestricted -Command try { Add-Computer -DomainName 'corp.local' -Credential (New-Object PSCredential('corp.local\\adminuser', (ConvertTo-SecureString 'SuperComplicatedPassword:-)' -AsPlainText -Force))) -Restart -Force; Write-Host 'Domain Join Successful' } catch { Write-Host $_.Exception.Message; exit 1 }"
     }
   SETTINGS
 
-  protected_settings = <<PROTECTED_SETTINGS
-    {
-      "Password": "SuperComplicatedPassword:-)"
-    }
-  PROTECTED_SETTINGS
+  depends_on = [azurerm_windows_virtual_machine.ad_vm]
 }
 
 # Creates an availability set for the SQL cluster VMs.
@@ -147,7 +178,7 @@ resource "azurerm_windows_virtual_machine" "vm" {
   availability_set_id = azurerm_availability_set.avset.id
 
   admin_username = "adminuser"
-  admin_password = "*SuperComplicatedPassword:-)"
+  admin_password = "SuperComplicatedPassword:-)"
 
   network_interface_ids = [
     azurerm_network_interface.nic[count.index].id
@@ -161,31 +192,53 @@ resource "azurerm_windows_virtual_machine" "vm" {
   source_image_reference {
     publisher = "MicrosoftWindowsServer"
     offer     = "WindowsServer"
-    sku       = "2019-Datacenter"
+    sku       = "2022-datacenter-g2"
     version   = "latest"
   }
 
   # Provisioner to run a custom script for Failover Clustering and SQL Server setup.
-  provisioner "local-exec" {
-    command = "az vm extension set --name CustomScriptExtension --publisher Microsoft.Compute --resource-group ${azurerm_resource_group.rg.name} --vm-name sql-cluster-node-${count.index + 1} --settings @${path.module}/custom_script_settings.json --protected-settings @${path.module}/custom_script_protected_settings.json"
-  }
+  # provisioner "local-exec" {
+  #   command = "az vm extension set --name CustomScriptExtension --publisher Microsoft.Compute --resource-group ${azurerm_resource_group.rg.name} --vm-name sql-cluster-node-${count.index + 1} --settings @${path.module}/custom_script_settings.json --protected-settings @${path.module}/custom_script_protected_settings.json"
+  # }
 }
 
-# Creates a custom script extension for Failover Clustering and SQL Server setup on the VMs.
-resource "azurerm_virtual_machine_extension" "cluster_setup" {
+# Create a script to mount Azure file share on the sql cluster nodes
+resource "azurerm_virtual_machine_extension" "mount_file_share" {
   count                = 2
-  name                 = "setup-cluster-${count.index}"
+  name                 = "mount-file-share-${count.index}"
   virtual_machine_id   = azurerm_windows_virtual_machine.vm[count.index].id
   publisher            = "Microsoft.Compute"
   type                 = "CustomScriptExtension"
   type_handler_version = "1.10"
+  settings = <<SETTINGS
+    {
+      "storageAccountName": "${azurerm_storage_account.storage.name}",
+      "storageAccountKey": "${azurerm_storage_account.storage.primary_access_key}"
+    }
+  SETTINGS
 
-  settings = templatefile("${path.module}/custom_script_settings.json", {
-    StorageAccountName = azurerm_storage_account.storage.name
-    StorageAccountKey  = azurerm_storage_account.storage.primary_access_key
-    FileShareName      = azurerm_storage_share.fileshare.name
-  })
+  protected_settings = <<PROTECTED_SETTINGS
+    {
+      "commandToExecute": "powershell -Command \"`$secpasswd = ConvertTo-SecureString '${azurerm_storage_account.storage.primary_access_key}' -AsPlainText -Force; `$creds = New-Object System.Management.Automation.PSCredential ('${azurerm_storage_account.storage.name}', `$secpasswd); New-PSDrive -Name Z -PSProvider FileSystem -Root \\\\${azurerm_storage_account.storage.name}.file.core.windows.net\\${azurerm_storage_share.fileshare.name} -Credential `$creds -Persist\""
+    }
+  PROTECTED_SETTINGS
 }
+
+# Creates a custom script extension for Failover Clustering and SQL Server setup on the VMs.
+# resource "azurerm_virtual_machine_extension" "cluster_setup" {
+#   count                = 2
+#   name                 = "setup-cluster-${count.index}"
+#   virtual_machine_id   = azurerm_windows_virtual_machine.vm[count.index].id
+#   publisher            = "Microsoft.Compute"
+#   type                 = "CustomScriptExtension"
+#   type_handler_version = "1.10"
+
+#   settings = templatefile("${path.module}/custom_script_settings.json", {
+#     StorageAccountName = azurerm_storage_account.storage.name
+#     StorageAccountKey  = azurerm_storage_account.storage.primary_access_key
+#     FileShareName      = azurerm_storage_share.fileshare.name
+#   })
+# }
 
 # Creates network interfaces for the SQL cluster VMs.
 resource "azurerm_network_interface" "nic" {
